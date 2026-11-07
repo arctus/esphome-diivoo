@@ -220,5 +220,4 @@ replaces the vendor firmware: do it at your own risk.
 
 ## License
 
-[GNU Affero General Public License v3.0](LICENSE), the same licence as
-hassio-diivoo2mqtt, from which this work is derived.
+[GNU Affero General Public License v3.0](LICENSE).
