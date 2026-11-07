@@ -1,0 +1,6 @@
+# ESPHome build output and local secrets
+.esphome/
+example/.esphome/
+example/secrets.yaml
+__pycache__/
+*.pyc

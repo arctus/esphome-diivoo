@@ -1,0 +1,182 @@
+# Example: a DIIVOO WG03 gateway with one 3-zone valve (WT-11W).
+#
+# This file builds the component from this repository's checkout (CI does
+# exactly that). In your own config, take the component from GitHub instead:
+#
+#   external_components:
+#     - source: github://arctus/esphome-diivoo@v1.0.0
+#       components: [diivoo]
+
+substitutions:
+  device_name: diivoo-gateway
+  friendly_name: Garden Irrigation
+
+esphome:
+  name: ${device_name}
+  friendly_name: ${friendly_name}
+  # make_entity_preference() arrived in 2026.7.
+  min_version: 2026.7.0
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+external_components:
+  - source:
+      type: local
+      path: ../components
+    components: [diivoo]
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+logger:
+  level: DEBUG
+
+api:
+
+ota:
+  - platform: esphome
+
+time:
+  - platform: homeassistant
+    id: ha_time
+
+# Gateway LED (active low): ESPHome's status light.
+status_led:
+  pin:
+    number: GPIO14
+    inverted: true
+
+# WG03 radio wiring.
+diivoo:
+  id: gateway
+  sclk_pin: GPIO27
+  sdio_pin: GPIO19
+  csb_pin: GPIO25
+  fcsb_pin: GPIO26
+  power_pin:
+    number: GPIO21
+    inverted: true # LOW powers the radio
+  irq_pin:
+    number: GPIO18
+    mode:
+      input: true
+      pulldown: true
+  # Pick any non-zero 32-bit number and keep it: valves pair to this id.
+  # Omit it to derive one from the ESP32's MAC (lost if the board changes).
+  hub_id: 0x12345678
+  time_id: ha_time
+  pairing_timeout: 5min
+  valves:
+    - id: garden_valve
+      zones: 3 # WT-07W = 1, WT-09W = 2, WT-11W = 3, WT-13W = 4
+
+binary_sensor:
+  # The gateway's button toggles pairing mode.
+  - platform: gpio
+    id: gateway_button
+    pin:
+      number: GPIO13
+      mode:
+        input: true
+        pullup: true
+      inverted: true
+    filters:
+      - delayed_on: 50ms
+    on_press:
+      - switch.toggle: pairing_mode
+
+  - platform: diivoo
+    type: online
+    diivoo_valve: garden_valve
+    name: Valve Online
+  - platform: diivoo
+    type: battery_low
+    diivoo_valve: garden_valve
+    name: Valve Battery Low
+
+switch:
+  - platform: diivoo
+    id: pairing_mode
+    name: Pairing Mode
+
+valve:
+  - platform: diivoo
+    diivoo_valve: garden_valve
+    zone: 1
+    name: Zone 1
+  - platform: diivoo
+    diivoo_valve: garden_valve
+    zone: 2
+    name: Zone 2
+  - platform: diivoo
+    diivoo_valve: garden_valve
+    zone: 3
+    name: Zone 3
+
+number:
+  - platform: diivoo
+    diivoo_valve: garden_valve
+    zone: 1
+    name: Zone 1 Duration
+  - platform: diivoo
+    diivoo_valve: garden_valve
+    zone: 2
+    name: Zone 2 Duration
+  - platform: diivoo
+    diivoo_valve: garden_valve
+    zone: 3
+    name: Zone 3 Duration
+
+sensor:
+  - platform: diivoo
+    type: remaining_time
+    diivoo_valve: garden_valve
+    zone: 1
+    name: Zone 1 Remaining Time
+  - platform: diivoo
+    type: remaining_time
+    diivoo_valve: garden_valve
+    zone: 2
+    name: Zone 2 Remaining Time
+  - platform: diivoo
+    type: remaining_time
+    diivoo_valve: garden_valve
+    zone: 3
+    name: Zone 3 Remaining Time
+  - platform: diivoo
+    type: last_water_volume
+    diivoo_valve: garden_valve
+    zone: 1
+    name: Zone 1 Last Water Volume
+  - platform: diivoo
+    type: battery_level
+    diivoo_valve: garden_valve
+    name: Valve Battery Level
+  - platform: diivoo
+    type: rssi
+    diivoo_valve: garden_valve
+    name: Valve Signal Strength
+
+text_sensor:
+  - platform: diivoo
+    type: valve_id
+    diivoo_valve: garden_valve
+    name: Valve ID
+  - platform: diivoo
+    type: model
+    diivoo_valve: garden_valve
+    name: Valve Model
+
+button:
+  - platform: diivoo
+    type: refresh
+    diivoo_valve: garden_valve
+    name: Valve Refresh
+  - platform: diivoo
+    type: unpair
+    diivoo_valve: garden_valve
+    name: Valve Unpair

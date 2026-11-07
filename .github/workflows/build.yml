@@ -1,0 +1,79 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Validate and compile the example
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install ESPHome
+        run: pip install esphome
+
+      - name: Cache ESPHome toolchains
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            ~/.esphome
+            ~/.cache/esphome
+          key: esphome-${{ runner.os }}-${{ hashFiles('example/diivoo-gateway.yaml') }}
+          restore-keys: esphome-${{ runner.os }}-
+
+      - name: Dummy secrets
+        run: cp example/secrets.yaml.example example/secrets.yaml
+
+      - name: Validate
+        run: esphome config example/diivoo-gateway.yaml
+
+      - name: Compile
+        run: esphome compile example/diivoo-gateway.yaml
+
+      - name: Collect firmware
+        run: |
+          mkdir -p firmware
+          find example/.esphome/build/diivoo-gateway -name '*.bin' \
+            \( -path '*/build/diivoo-gateway*.bin' -o -name 'firmware*.bin' \) \
+            -exec cp {} firmware/ \;
+          ls -la firmware
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: example-firmware
+          path: firmware/*.bin
+          if-no-files-found: warn
+
+  release:
+    name: Publish release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: example-firmware
+          path: firmware
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: CHANGELOG.md
+          files: firmware/*.bin
