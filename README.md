@@ -1,5 +1,7 @@
 # esphome-diivoo
 
+[![Ko-fi](https://img.shields.io/badge/Ko--fi-support%20me-FF5E5B?logo=ko-fi&logoColor=white)](https://ko-fi.com/pavelcu)
+
 ESPHome external component that turns the **DIIVOO WG03** irrigation gateway
 into a fully local controller for DIIVOO battery water timers. The gateway's
 own ESP32 drives its CMT2300A sub-GHz radio and talks to Home Assistant over
@@ -242,6 +244,13 @@ requests filled in much of the protocol.
 
 This project is not affiliated with DIIVOO, HomGar or RainPoint. Flashing
 replaces the vendor firmware: do it at your own risk.
+
+## Support
+
+If this component saves you time, you can buy me a coffee on
+[Ko-fi](https://ko-fi.com/pavelcu). And please consider
+[supporting Stefan](https://ko-fi.com/stefantechnerdsg) too: without his
+protocol work this component would not exist.
 
 ## License
 
