@@ -6,12 +6,13 @@ own ESP32 drives its CMT2300A sub-GHz radio and talks to Home Assistant over
 the native ESPHome API: no DIIVOO/HomGar cloud, no app, no add-on, no extra
 hardware.
 
-Each valve zone shows up in Home Assistant as a native `valve` entity. Home
-Assistant does the scheduling, so the valves' built-in schedules are not
-used.
+Each valve zone shows up in Home Assistant as a native `valve` entity. The
+entities are created by the component itself: pair a valve and the gateway
+detects its model and shows exactly its zones. Home Assistant does the
+scheduling, so the valves' built-in schedules are not used.
 
-> **Status: experimental.** The component validates and compiles. The radio
-> code is a faithful port of a protocol that works in
+> **Status: experimental.** The firmware runs on a real WG03 (Wi-Fi, API,
+> OTA). The radio code is a faithful port of a protocol that works in
 > [hassio-diivoo2mqtt](https://github.com/Technerd-SG/hassio-diivoo2mqtt),
 > but this ESPHome build has not yet been confirmed against a real valve.
 > Reports, especially logs at `VERBOSE`, are very welcome.
@@ -50,7 +51,11 @@ flashing.
   last run.
 - **Valve health:** battery (OK or low), signal strength, online status, and
   the valve id and model.
-- **Pairing from Home Assistant** with a switch, or with the gateway's button.
+- **Entities appear by themselves.** Up to `max_valves` slots of four zones
+  are built in. Pairing records the model from the valve's hardware id, and
+  only that model's zones are shown; empty slots stay hidden.
+- **Pairing from Home Assistant** with a switch, or with the gateway's button,
+  with the LED blinking while pairing mode is on.
 - **Silent valves are pinged.** A valve not heard from for 5 hours is woken
   up, and it shows offline after 12 hours.
 - **Pairing survives reflashes:** it is stored in flash.
@@ -80,7 +85,7 @@ Add the component to your ESPHome config:
 
 ```yaml
 external_components:
-  - source: github://arctus/esphome-diivoo@v1.0.0
+  - source: github://arctus/esphome-diivoo@v1.1.0
     components: [diivoo]
 
 time:
@@ -102,30 +107,34 @@ diivoo:
       pulldown: true
   hub_id: 0x12345678 # any non-zero number, keep it stable
   time_id: ha_time
-  valves:
-    - id: garden_valve
-      zones: 3
+  max_valves: 4
 ```
 
-[`example/diivoo-gateway.yaml`](example/diivoo-gateway.yaml) is a complete
-config with every entity.
+That is all: every valve, zone and diagnostic entity comes from the
+component. [`example/diivoo-gateway.yaml`](example/diivoo-gateway.yaml) is a
+complete config, with the button, the blinking LED and the power settings the
+WG03 needs.
 
 ### 3. Flash
 
 The first flash goes over USB (`esphome run your-config.yaml`). Later updates
-go over Wi-Fi as usual.
+go over Wi-Fi, **but see [Power](#power-wg03-quirks) below**: on the
+gateway's own mains supply they fail.
 
 ### 4. Pair your valves
 
 1. Turn on **Pairing Mode**, or press the gateway button.
 2. Power-cycle the valve: take a battery out and put it back in.
-3. The log shows `Slot 'garden_valve': paired valve 12345678`. Pairing mode
+3. The log shows `Slot 'valve_1': paired valve 12345678`. Pairing mode
    switches itself off after one valve, or after `pairing_timeout`.
-4. Press **Valve Refresh** once. The valve re-reads its settings and is told
+4. **The gateway restarts about 20 s later**, and Home Assistant then shows
+   *Valve 1 Zone 1*, *Valve 1 Zone 2*, ... for as many zones as the model has.
+5. Press **Valve 1 Refresh** once. The valve re-reads its settings and is told
    it has no schedules, which clears any plans left over from the app.
 
-Each valve declared under `valves:` is a slot, and pairing fills the first
-empty one. **Valve Unpair** frees its slot again.
+Pairing fills the first empty slot. **Valve N Unpair** frees it again (and
+restarts the gateway to hide its entities). A valve with an unknown hardware
+id gets all four zones.
 
 ## Configuration reference
 
@@ -139,28 +148,44 @@ empty one. **Valve Unpair** frees its slot again.
 | `hub_id` | no | 32-bit id the valves pair to. Defaults to a value derived from the MAC address. Set it so a new board keeps the pairing. |
 | `time_id` | yes | a `time` component. Valves are sent the current time. |
 | `pairing_timeout` | no | default `5min` |
-| `valves` | yes | list of slots: `id` and `zones` (1-4) |
+| `max_valves` | no | number of valve slots, 1-8, default `4` |
+| `pairing_light` | no | a light to drive while pairing mode is on |
+| `pairing_effect` | no | effect of that light to run while pairing (else it is just on) |
 
 ### Entities
 
-All entity platforms take `diivoo_valve: <slot id>`. Per-zone ones also take
-`zone: <1-4>`.
+Created automatically, per slot `N` (1 ... `max_valves`):
 
-| Platform | `type` | Scope | What it is |
-|---|---|---|---|
-| `valve` | - | zone | open or close the zone |
-| `number` | - | zone | run time in minutes (1-1092) |
-| `sensor` | `remaining_time` | zone | seconds left in the current run |
-| `sensor` | `last_water_volume` | zone | litres used by the last run |
-| `sensor` | `battery_level` | valve | 100 % (OK) or 20 % (low) |
-| `sensor` | `rssi` | valve | signal strength, dBm |
-| `binary_sensor` | `online` | valve | heard from in the last 12 h |
-| `binary_sensor` | `battery_low` | valve | low battery |
-| `text_sensor` | `valve_id` | valve | radio id of the paired valve |
-| `text_sensor` | `model` | valve | WT-07W ... WT-13W |
-| `button` | `refresh` | valve | wake the valve and re-sync it |
-| `button` | `unpair` | valve | forget the paired valve |
-| `switch` | - | gateway | pairing mode (`diivoo_id` instead of `diivoo_valve`) |
+| Entity | Scope | What it is |
+|---|---|---|
+| valve *Valve N Zone Z* | zone | open or close the zone |
+| number *Valve N Zone Z Duration* | zone | run time in minutes (1-1092) |
+| sensor *Valve N Zone Z Remaining Time* | zone | seconds left in the current run |
+| sensor *Valve N Zone Z Last Water Volume* | zone | litres used by the last run |
+| sensor *Valve N Battery Level* | valve | 100 % (OK) or 20 % (low) |
+| sensor *Valve N Signal Strength* | valve | dBm |
+| binary sensor *Valve N Online* | valve | heard from in the last 12 h |
+| binary sensor *Valve N Battery Low* | valve | low battery |
+| text sensor *Valve N ID* / *Valve N Model* | valve | radio id, WT-07W ... WT-13W |
+| button *Valve N Refresh* / *Valve N Unpair* | valve | re-sync, or forget the valve |
+| switch *Pairing Mode* | gateway | pairing on/off |
+
+The gateway button can call `id(<diivoo id>).toggle_pairing_mode()` from a
+lambda. Hiding uses `set_internal()` at boot, which ESPHome deprecates for
+removal in 2027.3; the component skips it from that version on, so empty
+slots would then show as unavailable instead.
+
+## Power (WG03 quirks)
+
+- **The 3.3 V rail is weak.** At full Wi-Fi TX power the board brown-out-loops
+  at Wi-Fi start. Run it at `cpu_frequency: 160MHZ`, Wi-Fi `output_power:
+  8.5dB` and with `CONFIG_ESP_BROWNOUT_DET: n`, as the example does.
+- **OTA fails on the gateway's own mains supply.** The upload completes, then
+  the device logs `esp_image: image at 0x1d0000 has invalid magic byte` and
+  `esp_ota_end failed (err=0x1503)`: the flash erase silently never happens
+  (it is not write protection; the block-protect bits are clear). Powered
+  from a USB-serial adapter's 3.3 V instead, the same OTA succeeds. Update it
+  on the adapter, **with mains disconnected - never both at once**.
 
 ## How it works
 

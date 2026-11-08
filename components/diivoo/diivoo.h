@@ -26,6 +26,9 @@
 #include "esphome/components/text_sensor/text_sensor.h"
 #include "esphome/components/time/real_time_clock.h"
 #include "esphome/components/valve/valve.h"
+#ifdef USE_LIGHT
+#include "esphome/components/light/light_state.h"
+#endif
 
 #include "cmt2300a.h"
 
@@ -128,11 +131,13 @@ struct ZoneState {
   sensor::Sensor *water_sensor{nullptr};
 };
 
-/// One valve slot declared in YAML. Pairing fills the first empty slot.
+/// One valve slot. The component creates `max_valves` of them, each with a
+/// full set of entities for four zones; pairing fills the first empty slot,
+/// and only the zones the paired model really has are shown to Home
+/// Assistant (decided at boot, so the gateway restarts after a pairing).
 class DiivooValve {
  public:
-  DiivooValve(uint8_t zones, uint32_t pref_hash, const char *slot_name)
-      : zone_count_(zones), pref_hash_(pref_hash), slot_name_(slot_name) {}
+  DiivooValve(uint32_t pref_hash, const char *slot_name) : pref_hash_(pref_hash), slot_name_(slot_name) {}
 
   // ---- Codegen setters
 
@@ -146,12 +151,15 @@ class DiivooValve {
   void set_online_sensor(binary_sensor::BinarySensor *s) { this->online_sensor_ = s; }
   void set_valve_id_sensor(text_sensor::TextSensor *s) { this->valve_id_sensor_ = s; }
   void set_model_sensor(text_sensor::TextSensor *s) { this->model_sensor_ = s; }
+  void set_refresh_button(button::Button *b) { this->refresh_button_ = b; }
+  void set_unpair_button(button::Button *b) { this->unpair_button_ = b; }
 
 
   // ---- Entity API
 
   DiivooHub *hub() const { return this->hub_; }
-  uint8_t zone_count() const { return this->zone_count_; }
+  /// Zones of the paired model (0 when the slot is empty).
+  uint8_t zone_count() const;
   bool is_bound() const { return this->record_.bound == 1; }
   bool zone_running(uint8_t zone) const;
   uint32_t zone_duration_seconds(uint8_t zone) const;
@@ -171,9 +179,10 @@ class DiivooValve {
   void load();
   void save();
   void publish_identity();
+  /// Hide the entities of an empty slot and of zones the model lacks.
+  void apply_visibility();
 
   DiivooHub *hub_{nullptr};
-  uint8_t zone_count_;
   uint32_t pref_hash_;
   const char *slot_name_;
   ESPPreferenceObject pref_;
@@ -194,6 +203,8 @@ class DiivooValve {
   binary_sensor::BinarySensor *online_sensor_{nullptr};
   text_sensor::TextSensor *valve_id_sensor_{nullptr};
   text_sensor::TextSensor *model_sensor_{nullptr};
+  button::Button *refresh_button_{nullptr};
+  button::Button *unpair_button_{nullptr};
 };
 
 class DiivooHub : public Component {
@@ -210,6 +221,12 @@ class DiivooHub : public Component {
   void set_time(time::RealTimeClock *time) { this->time_ = time; }
   void set_pairing_timeout(uint32_t ms) { this->pairing_timeout_ms_ = ms; }
   void set_pairing_switch(DiivooPairingSwitch *s) { this->pairing_switch_ = s; }
+#ifdef USE_LIGHT
+  void set_pairing_light(light::LightState *light, const char *effect) {
+    this->pairing_light_ = light;
+    this->pairing_effect_ = effect;
+  }
+#endif
   void add_valve(DiivooValve *valve);
 
 
@@ -224,6 +241,7 @@ class DiivooHub : public Component {
   // ---- Entity API
 
   void set_pairing_mode(bool on);
+  void toggle_pairing_mode() { this->set_pairing_mode(!this->pairing_mode_); }
   /// Queue an open/close for one zone. False when the valve is not paired.
   bool request_zone(DiivooValve *valve, uint8_t zone, bool open);
   void request_refresh(DiivooValve *valve);
@@ -300,6 +318,8 @@ class DiivooHub : public Component {
   bool time_valid_() const;
   void encode_tuya_date_(uint8_t *out) const;
   uint8_t day_of_week_() const;
+  /// Restart once the radio is idle, so HA sees the new entity set.
+  void schedule_restart_(const char *reason);
 
 
   CMT2300A radio_;
@@ -311,6 +331,10 @@ class DiivooHub : public Component {
   InternalGPIOPin *irq_pin_{nullptr};
   time::RealTimeClock *time_{nullptr};
   DiivooPairingSwitch *pairing_switch_{nullptr};
+#ifdef USE_LIGHT
+  light::LightState *pairing_light_{nullptr};
+  const char *pairing_effect_{nullptr};
+#endif
 
   uint32_t hub_id_{0};
   std::vector<DiivooValve *> valves_;
@@ -340,6 +364,7 @@ class DiivooHub : public Component {
   bool boot_ping_done_{false};
   uint32_t last_zone_tick_{0};
   uint32_t last_watchdog_{0};
+  uint32_t restart_at_{0};
   HighFrequencyLoopRequester high_freq_;
 };
 

@@ -1,6 +1,9 @@
 #include "diivoo.h"
 
+#include "esphome/core/application.h"
 #include "esphome/core/log.h"
+#include "esphome/core/macros.h"
+#include "esphome/core/version.h"
 
 namespace esphome {
 namespace diivoo {
@@ -55,6 +58,9 @@ static const uint32_t PING_MIN_INTERVAL_MS = 10UL * 60 * 1000;
 static const uint32_t OFFLINE_AFTER_MS = 12UL * 60 * 60 * 1000;
 static const uint32_t FINISHED_GRACE_S = 60;
 static const uint16_t MAX_DURATION_S = 0xFFFF;
+// Let the post-pairing exchange (join response, parameter and schedule pull)
+// finish before restarting to publish the new entity set.
+static const uint32_t RESTART_DELAY_MS = 20000;
 
 static uint32_t read_le32(const uint8_t *p) {
   return uint32_t(p[0]) | (uint32_t(p[1]) << 8) | (uint32_t(p[2]) << 16) | (uint32_t(p[3]) << 24);
@@ -203,12 +209,55 @@ uint8_t DiivooValve::downlink_channel() const {
   return this->record_.channel_code - 1;
 }
 
+uint8_t DiivooValve::zone_count() const {
+  if (!this->is_bound())
+    return 0;
+  const uint8_t zones = zones_for_hardware(this->record_.hardware_id);
+  // An unknown model still gets every zone: better usable than hidden.
+  return zones != 0 ? zones : MAX_ZONES;
+}
+
 uint8_t DiivooValve::normalize_zone(uint8_t raw) const {
-  if (raw >= 1 && raw <= this->zone_count_)
+  const uint8_t zones = this->zone_count();
+  if (raw >= 1 && raw <= zones)
     return raw;
-  if (raw == 0 && this->zone_count_ == 1)
+  if (raw == 0 && zones == 1)
     return 1;
   return 0;
+}
+
+// Runs in setup(), before the API lists entities to Home Assistant, which is
+// the one moment the internal flag is honoured. ESPHome deprecated changing
+// it at runtime and drops set_internal() in 2027.3; from then on every
+// entity simply stays visible.
+void DiivooValve::apply_visibility() {
+#if ESPHOME_VERSION_CODE < VERSION_CODE(2027, 3, 0)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+  const bool bound = this->is_bound();
+  const uint8_t zones = this->zone_count();
+  auto hide = [](EntityBase *entity, bool hidden) {
+    if (entity != nullptr)
+      entity->set_internal(hidden);
+  };
+  hide(this->rssi_sensor_, !bound);
+  hide(this->battery_sensor_, !bound);
+  hide(this->battery_low_sensor_, !bound);
+  hide(this->online_sensor_, !bound);
+  hide(this->valve_id_sensor_, !bound);
+  hide(this->model_sensor_, !bound);
+  hide(this->refresh_button_, !bound);
+  hide(this->unpair_button_, !bound);
+  for (uint8_t zone = 1; zone <= MAX_ZONES; zone++) {
+    const bool hidden = zone > zones;
+    ZoneState &state = this->zone_(zone);
+    hide(state.valve, hidden);
+    hide(state.duration, hidden);
+    hide(state.remaining_sensor, hidden);
+    hide(state.water_sensor, hidden);
+  }
+#pragma GCC diagnostic pop
+#endif
 }
 
 void DiivooValve::load() {
@@ -252,6 +301,7 @@ void DiivooHub::setup() {
 
   for (auto *valve : this->valves_) {
     valve->load();
+    valve->apply_visibility();
     valve->publish_identity();
   }
 
@@ -289,9 +339,9 @@ void DiivooHub::dump_config() {
     if (valve->is_bound()) {
       ESP_LOGCONFIG(TAG, "  Slot '%s': valve %u, %s, %u zone(s), address %u, channel %u", valve->slot_name_,
                     (unsigned) valve->record_.valve_id, model_for_hardware(valve->record_.hardware_id),
-                    valve->zone_count_, valve->record_.address, valve->downlink_channel());
+                    valve->zone_count(), valve->record_.address, valve->downlink_channel());
     } else {
-      ESP_LOGCONFIG(TAG, "  Slot '%s': not paired (%u zone(s))", valve->slot_name_, valve->zone_count_);
+      ESP_LOGCONFIG(TAG, "  Slot '%s': not paired", valve->slot_name_);
     }
   }
 }
@@ -304,6 +354,14 @@ void DiivooHub::loop() {
   if (this->pairing_mode_ && now - this->pairing_started_ > this->pairing_timeout_ms_) {
     ESP_LOGI(TAG, "Pairing mode timed out");
     this->set_pairing_mode(false);
+  }
+  if (this->restart_at_ != 0 && now >= this->restart_at_) {
+    if (this->job_active_ || !this->urgent_.empty() || !this->normal_.empty()) {
+      this->restart_at_ = now + 2000;  // radio busy: try again shortly
+    } else {
+      ESP_LOGI(TAG, "Restarting to publish the new set of valve entities");
+      App.safe_reboot();
+    }
   }
   if (now - this->last_zone_tick_ >= ZONE_TICK_MS) {
     this->last_zone_tick_ = now;
@@ -332,10 +390,28 @@ void DiivooHub::set_pairing_mode(bool on) {
   }
   if (this->pairing_switch_ != nullptr)
     this->pairing_switch_->publish_state(on);
+#ifdef USE_LIGHT
+  if (this->pairing_light_ != nullptr) {
+    if (on) {
+      auto call = this->pairing_light_->turn_on();
+      if (this->pairing_effect_ != nullptr)
+        call.set_effect(this->pairing_effect_);
+      call.perform();
+    } else {
+      this->pairing_light_->turn_off().perform();
+    }
+  }
+#endif
+}
+
+void DiivooHub::schedule_restart_(const char *reason) {
+  ESP_LOGI(TAG, "%s - restarting in %u s so Home Assistant picks up the entity change", reason,
+           (unsigned) (RESTART_DELAY_MS / 1000));
+  this->restart_at_ = millis() + RESTART_DELAY_MS;
 }
 
 bool DiivooHub::request_zone(DiivooValve *valve, uint8_t zone, bool open) {
-  if (!valve->is_bound() || zone < 1 || zone > valve->zone_count_)
+  if (!valve->is_bound() || zone < 1 || zone > valve->zone_count())
     return false;
 
   // A newer command for the same zone replaces one still waiting in the queue.
@@ -410,7 +486,7 @@ void DiivooHub::unpair(DiivooValve *valve) {
   valve->save();
   valve->last_seen_ = 0;
   valve->publish_identity();
-  for (uint8_t zone = 1; zone <= valve->zone_count_; zone++) {
+  for (uint8_t zone = 1; zone <= MAX_ZONES; zone++) {
     ZoneState &state = valve->zone_(zone);
     state.running = false;
     state.known = false;
@@ -422,6 +498,7 @@ void DiivooHub::unpair(DiivooValve *valve) {
     valve->online_sensor_->publish_state(false);
   valve->online_published_ = false;
   valve->online_known_ = true;
+  this->schedule_restart_("Valve unpaired");
 }
 
 // ======================================================================
@@ -738,11 +815,6 @@ void DiivooHub::handle_join_(DiivooValve *valve, uint32_t sender, uint8_t seq, c
   };
 
   if (!valve->is_bound()) {
-    const uint8_t zones = zones_for_hardware(hardware_id);
-    if (zones != 0 && zones != valve->zone_count_) {
-      ESP_LOGW(TAG, "Slot '%s' is declared with %u zone(s) but this %s has %u", valve->slot_name_,
-               valve->zone_count_, model_for_hardware(hardware_id), zones);
-    }
     valve->record_.valve_id = sender;
     valve->record_.hardware_id = hardware_id;
     valve->record_.address = this->allocate_address_();
@@ -757,6 +829,7 @@ void DiivooHub::handle_join_(DiivooValve *valve, uint32_t sender, uint8_t seq, c
     add_channel(PAIRING_CHANNEL);
     add_channel(valve->downlink_channel());
     this->set_pairing_mode(false);
+    this->schedule_restart_("New valve paired");
   } else {
     if (valve->record_.hardware_id != hardware_id) {
       valve->record_.hardware_id = hardware_id;
@@ -944,7 +1017,7 @@ void DiivooHub::publish_zone_(DiivooValve *valve, uint8_t zone) {
 void DiivooHub::service_zones_() {
   const uint32_t now = millis();
   for (auto *valve : this->valves_) {
-    for (uint8_t zone = 1; zone <= valve->zone_count_; zone++) {
+    for (uint8_t zone = 1; zone <= valve->zone_count(); zone++) {
       ZoneState &state = valve->zone_(zone);
       if (state.running && state.known && !state.busy) {
         const uint32_t elapsed = (now - state.reported_at) / 1000;
